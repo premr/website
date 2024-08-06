@@ -36,6 +36,11 @@ ingress:
   certName: website-ssl-certificate
 nl:
   enabled: true
+  env:
+    default_indexes:
+      - medium_ft
+    enabled_indexes:
+      - medium_ft
 
 serviceGroups:
   recon: null

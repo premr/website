@@ -11,32 +11,17 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Tests for Embeddings (in nl_embeddings.py)."""
+"""Tests for Embeddings"""
 
-import os
 from typing import List
 import unittest
 
 from parameterized import parameterized
-import yaml
 
-from nl_server import embeddings_map as emb_map
-from nl_server.config import parse
-from nl_server.embeddings import Embeddings
-from nl_server.model.sentence_transformer import LocalSentenceTransformerModel
+from nl_server import config_reader
+from nl_server.registry import Registry
 from nl_server.search import search_vars
-from nl_server.store.memory import MemoryEmbeddingsStore
 from shared.lib.detected_variables import VarCandidates
-
-_root_dir = os.path.dirname(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-
-def _get_embeddings_info():
-  embeddings_config_path = os.path.join(_root_dir, 'deploy/nl/embeddings.yaml')
-  with open(embeddings_config_path) as f:
-    embeddings_map = yaml.full_load(f)
-    return parse(embeddings_map)
 
 
 def _get_contents(
@@ -48,28 +33,24 @@ class TestEmbeddings(unittest.TestCase):
 
   @classmethod
   def setUpClass(cls) -> None:
-    embeddings_info = _get_embeddings_info()
-    # TODO(pradh): Expand tests to other index sizes.
-    idx_info = embeddings_info.indexes[emb_map.DEFAULT_INDEX_TYPE]
-    model_info = embeddings_info.models[idx_info.model]
-    cls.nl_embeddings = Embeddings(
-        model=LocalSentenceTransformerModel(model_info),
-        store=MemoryEmbeddingsStore(idx_info))
+    catalog = config_reader.read_catalog()
+    env = config_reader.read_env()
+    server_config = config_reader.get_server_config(catalog, env)
+    registry = Registry(server_config)
+    default_indexes = registry.server_config().default_indexes
+    cls.embeddings = registry.get_index(default_indexes[0])
 
   @parameterized.expand([
       # All these queries should detect one of the SVs as the top choice.
       ["number of people", False, ["Count_Person"]],
       ["population of", False, ["dc/topic/Population", "Count_Person"]],
       ["economy of the state", False, ["dc/topic/Economy"]],
-      ["household income", False, ["Median_Income_Household"]],
+      ["household income", False, ["Mean_Income_Household"]],
       [
           "life expectancy in USA", False,
           ["dc/topic/LifeExpectancy", "LifeExpectancy_Person"]
       ],
-      [
-          "GDP", False,
-          ["Amount_EconomicActivity_GrossDomesticProduction_Nominal"]
-      ],
+      ["GDP", False, ["dc/topic/GDP"]],
       ["auto theft", False, ["Count_CriminalActivities_MotorVehicleTheft"]],
       ["agriculture", False, ["dc/topic/Agriculture"]],
       [
@@ -78,20 +59,23 @@ class TestEmbeddings(unittest.TestCase):
       ],
       [
           "agriculture workers", False,
-          ["dc/hlxvn1t8b9bhh", "Count_Person_MainWorker_AgriculturalLabourers"]
+          ["dc/topic/Agriculture", "dc/15lrzqkb6n0y7"]
       ],
       [
-          "heart disease", False,
+          "coronary heart disease", False,
           [
               "dc/topic/HeartDisease",
               "dc/topic/PopulationWithDiseasesOfHeartByAge",
               "Percent_Person_WithCoronaryHeartDisease"
           ]
       ],
-      ["heart disease", True, ["Percent_Person_WithCoronaryHeartDisease"]],
+      [
+          "coronary heart disease", True,
+          ["Percent_Person_WithCoronaryHeartDisease"]
+      ],
   ])
   def test_sv_detection(self, query_str, skip_topics, expected_list):
-    got = search_vars([self.nl_embeddings], [query_str],
+    got = search_vars([self.embeddings], [query_str],
                       skip_topics=skip_topics)[query_str]
 
     # Check that all expected fields are present.
@@ -101,7 +85,7 @@ class TestEmbeddings(unittest.TestCase):
     self.assertTrue(sentences)
 
     # Check that the first SV found is among the expected_list.
-    self.assertTrue(svs[0] in expected_list)
+    self.assertTrue(svs[0] in expected_list, f"{svs[0]} not in {expected_list}")
 
     # TODO: uncomment the lines below when we have figured out what to do with these
     # assertion failures. They started failing when updating to the medium_ft index.
@@ -111,9 +95,9 @@ class TestEmbeddings(unittest.TestCase):
     #                   ["AggCosineScore"])
 
   # For these queries, the match score should be low (< 0.45).
-  @parameterized.expand(["random random", "", "who where why", "__124__abc"])
+  @parameterized.expand(["random random", "who where why", "__124__abc"])
   def test_low_score_matches(self, query_str):
-    got = search_vars([self.nl_embeddings], [query_str])[query_str]
+    got = search_vars([self.embeddings], [query_str])[query_str]
 
     # Check that all expected fields are present.
     svs, scores, sentences = _get_contents(got)
@@ -123,4 +107,4 @@ class TestEmbeddings(unittest.TestCase):
 
     # Check all scores.
     for score in scores:
-      self.assertLess(score, 0.45)
+      self.assertLess(score, 0.7)

@@ -1,4 +1,4 @@
-# Copyright 2023 Google LLC
+# Copyright 2024 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,34 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from abc import ABC
 from dataclasses import dataclass
+from dataclasses import field
 from enum import Enum
-import json
-import logging
-import os
-from pathlib import Path
-from typing import Dict
+from typing import Dict, List
 
-import yaml
-
-from shared.lib import constants
-from shared.lib.custom_dc_util import is_custom_dc
-
-# Index constants.  Passed in `url=`
-CUSTOM_DC_INDEX: str = 'custom_ft'
-DEFAULT_INDEX_TYPE: str = 'medium_ft'
-
-# The default base model we use.
-EMBEDDINGS_BASE_MODEL_NAME: str = 'all-MiniLM-L6-v2'
-
-# App Config constants.
-ATTRIBUTE_MODEL_KEY: str = 'ATTRIBUTE_MODEL'
-NL_EMBEDDINGS_KEY: str = 'NL_EMBEDDINGS'
-NL_EMBEDDINGS_VERSION_KEY: str = 'NL_EMBEDDINGS_VERSION_MAP'
-VERTEX_AI_MODELS_KEY: str = 'VERTEX_AI_MODELS'
-
-_VERTEX_AI_MODEL_CONFIG_PATH: str = '/datacommons/nl/vertex_ai_models.json'
+import dacite
 
 
 class StoreType(str, Enum):
@@ -58,161 +36,93 @@ class ModelUsage(str, Enum):
   RERANKING = 'RERANKING'
 
 
-@dataclass
-class ModelConfig(ABC):
-  type: str
-  score_threshold: float
-  usage: str
+@dataclass(kw_only=True)
+class ModelConfig:
+  type: str = None
+  usage: str = None
+  score_threshold: float = None
 
 
-@dataclass
+@dataclass(kw_only=True)
 class VertexAIModelConfig(ModelConfig):
-  project_id: str
-  location: str
-  prediction_endpoint_id: str
+  project_id: str = None
+  location: str = None
+  prediction_endpoint_id: str = None
 
 
-@dataclass
+@dataclass(kw_only=True)
 class LocalModelConfig(ModelConfig):
-  gcs_folder: str = ''
+  gcs_folder: str = None
 
 
-@dataclass
-class IndexConfig(ABC):
-  store_type: str
-  model: str
+@dataclass(kw_only=True)
+class IndexConfig:
+  store_type: str = None
+  source_path: str = None
+  model: str = None
+  healthcheck_query: str = 'health'
 
 
-@dataclass
+@dataclass(kw_only=True)
 class MemoryIndexConfig(IndexConfig):
-  embeddings_path: str
+  embeddings_path: str = None
 
 
-@dataclass
+@dataclass(kw_only=True)
 class LanceDBIndexConfig(IndexConfig):
-  embeddings_path: str
+  embeddings_path: str = None
 
 
-@dataclass
+@dataclass(kw_only=True)
 class VertexAIIndexConfig(IndexConfig):
-  project_id: str
-  location: str
-  index_endpoint_root: str
-  index_endpoint: str
-  index_id: str
+  project_id: str = None
+  location: str = None
+  index_endpoint_root: str = None
+  index_endpoint: str = None
+  index_id: str = None
 
 
-# Defines one embeddings index config.
-@dataclass
-class EmbeddingsConfig:
+# Check
+# https://github.com/datacommonsorg/website/assets/5951856/81bfdf68-0119-4755-95f3-2742cc74655c
+# to see the relation between the following configs and the Registry object.
+
+
+@dataclass(kw_only=True)
+class Catalog:
+  """
+  This represents the full catalog of models and indexes.
+
+  Only a subset of them are enabled/used by the Env config at runtime.
+  """
+  version: str = None
   indexes: Dict[str, IndexConfig]
   models: Dict[str, ModelConfig]
 
 
-#
-# Get Dict of vertex ai model to its info
-#
-def _get_vertex_ai_model_info() -> Dict[str, any]:
-  # Custom DC doesn't use vertex ai so just return an empty dict
-  # TODO: if we want to use vertex ai for custom dc, can add a file with the
-  # config to the custom dc docker image here: https://github.com/datacommonsorg/website/blob/master/build/web_compose/Dockerfile#L67
-  if is_custom_dc():
-    return {}
+@dataclass(kw_only=True)
+class Env:
+  """
+  A class to represent the NL server environment config.
+  This object is used with the Catalog object to configure the server.
+  """
+  default_indexes: List[str]
+  enabled_indexes: List[str]
+  vertex_ai_models: Dict[str, VertexAIModelConfig] = field(default_factory=dict)
+  enable_reranking: bool = False
 
-  # This is the path to model info when deployed in gke.
-  if os.path.exists(_VERTEX_AI_MODEL_CONFIG_PATH):
-    with open(_VERTEX_AI_MODEL_CONFIG_PATH) as f:
-      return json.load(f) or {}
-  # If that path doesn't exist, assume we are running locally and use the values
-  # from autopush.
-  else:
-    current_file_path = Path(__file__)
-    autopush_env_values = f'{current_file_path.parent.parent}/deploy/helm_charts/envs/autopush.yaml'
-    with open(autopush_env_values) as f:
-      autopush_env = yaml.full_load(f)
-      return autopush_env['nl']['vertex_ai_models']
+  def from_dict(d):
+    return dacite.from_dict(data_class=Env, data=d)
 
 
-#
-# Parse the input `embeddings.yaml` dict representation into EmbeddingsInfo
-# object.
-#
-def parse(embeddings_map: Dict[str, any]) -> EmbeddingsConfig:
-  get_vertex_ai_model_info = _get_vertex_ai_model_info()
-  if embeddings_map['version'] == 1:
-    return parse_v1(embeddings_map, get_vertex_ai_model_info)
-  else:
-    raise AssertionError('Could not parse embeddings map: unsupported version.')
+@dataclass(kw_only=True)
+class ServerConfig:
+  """
+  A class to hold the runtime server config.
 
-
-#
-# Parses the v1 version of the `embeddings.yaml` dict representation into
-# EmbeddingsInfo object.
-#
-def parse_v1(embeddings_map: Dict[str, any],
-             vertex_ai_model_info: Dict[str, any]) -> EmbeddingsConfig:
-  # parse the models
-  models = {}
-  for model_name, model_info in embeddings_map.get('models', {}).items():
-    model_type = model_info['type']
-    score_threshold = model_info.get('score_threshold',
-                                     constants.SV_SCORE_DEFAULT_THRESHOLD)
-    if model_type == ModelType.LOCAL:
-      models[model_name] = LocalModelConfig(type=model_type,
-                                            score_threshold=score_threshold,
-                                            usage=model_info['usage'],
-                                            gcs_folder=model_info['gcs_folder'])
-    elif model_type == ModelType.VERTEXAI:
-      if model_name not in vertex_ai_model_info:
-        logging.error(
-            f'Could not find vertex ai model information for {model_name}')
-        continue
-      models[model_name] = VertexAIModelConfig(
-          type=model_type,
-          score_threshold=score_threshold,
-          usage=model_info['usage'],
-          project_id=vertex_ai_model_info[model_name]['project_id'],
-          prediction_endpoint_id=vertex_ai_model_info[model_name]
-          ['prediction_endpoint_id'],
-          location=vertex_ai_model_info[model_name]['location'])
-    else:
-      raise AssertionError(
-          'Error parsing information for model {model_name}: unsupported type {model_type}'
-      )
-
-  # parse the indexes
-  indexes = {}
-  for index_name, index_info in embeddings_map.get('indexes', {}).items():
-    store_type = index_info['store']
-    if store_type == StoreType.MEMORY:
-      indexes[index_name] = MemoryIndexConfig(
-          store_type=store_type,
-          model=index_info['model'],
-          embeddings_path=index_info['embeddings'])
-    elif store_type == StoreType.LANCEDB:
-      indexes[index_name] = LanceDBIndexConfig(
-          store_type=store_type,
-          model=index_info['model'],
-          embeddings_path=index_info['embeddings'])
-    elif store_type == StoreType.VERTEXAI:
-      indexes[index_name] = VertexAIIndexConfig(
-          store_type=store_type,
-          model=index_info['model'],
-          project_id=index_info['project_id'],
-          location=index_info['location'],
-          index_endpoint_root=index_info['index_endpoint_root'],
-          index_endpoint=index_info['index_endpoint'],
-          index_id=index_info['index_id'])
-    else:
-      raise AssertionError(
-          'Error parsing information for index {index_name}: unsupported store type {store_type}'
-      )
-
-  return EmbeddingsConfig(indexes=indexes, models=models)
-
-
-# Returns true if VERTEXAI type models and VERTEXAI type stores are allowed
-def allow_vertex_ai() -> bool:
-  return os.environ.get('FLASK_ENV') in [
-      'local', 'test', 'integration_test', 'autopush', 'dev'
-  ]
+  This config is obtained from the catalog and environment config.
+  """
+  version: str
+  default_indexes: List[str]
+  indexes: Dict[str, IndexConfig]
+  models: Dict[str, ModelConfig]
+  enable_reranking: bool
